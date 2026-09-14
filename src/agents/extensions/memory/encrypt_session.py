@@ -231,6 +231,24 @@ class EncryptedSession(SessionABC):
             wrapper=wrapper,
         )
 
+    def _is_expired_envelope(self, token: bytes) -> bool:
+        """Check whether a token fails decryption solely due to TTL expiration.
+
+        Returns False if the token fails HMAC verification or key decryption.
+        """
+        if self.ttl is None:
+            return False
+        try:
+            self.cipher.decrypt(token, ttl=None)
+        except InvalidToken:
+            return False
+
+        try:
+            self.cipher.decrypt(token, ttl=self.ttl)
+            return False
+        except InvalidToken:
+            return True
+
     async def pop_item(
         self,
         *,
@@ -247,6 +265,26 @@ class EncryptedSession(SessionABC):
             item = self._unwrap(enc)
             if item is not None:
                 return item
+
+            is_expired = False
+            if _is_encrypted_envelope(enc):
+                try:
+                    token = enc["payload"].encode("utf-8")
+                    is_expired = self._is_expired_envelope(token)
+                except Exception:
+                    pass
+
+            if is_expired:
+                continue
+
+            await _call_session_method(
+                self.underlying_session.add_items,
+                cast(list[TResponseInputItem], [enc]),
+                wrapper=wrapper,
+            )
+            raise InvalidToken(
+                "Encrypted session item could not be decrypted with the provided key"
+            )
 
     async def clear_session(
         self,

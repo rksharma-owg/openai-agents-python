@@ -8,7 +8,7 @@ import pytest
 
 pytest.importorskip("cryptography")  # Skip tests if cryptography is not installed
 
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
 
 from agents import (
     Agent,
@@ -641,3 +641,46 @@ async def test_runner_with_session_settings_override(encryption_key: str):
     assert len(history_items) == 2
 
     underlying.close()
+
+
+async def test_encrypted_session_pop_item_wrong_key_preserves_ciphertext():
+    """Test that pop_item with an incorrect key raises InvalidToken and preserves ciphertext."""
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = str(Path(tmp) / "history.db")
+        store = SQLiteSession("conversation", db_path)
+        try:
+            correct = EncryptedSession(
+                session_id="conversation",
+                underlying_session=store,
+                encryption_key="example-correct-key",
+                ttl=3600,
+            )
+            wrong = EncryptedSession(
+                session_id="conversation",
+                underlying_session=store,
+                encryption_key="example-wrong-key",
+                ttl=3600,
+            )
+            messages = [
+                {"role": "user", "content": "hello"},
+                {"role": "assistant", "content": "hi"},
+                {"role": "user", "content": "follow-up"},
+            ]
+            await correct.add_items(messages)
+            assert await correct.get_items() == messages
+
+            # Verify that stored ciphertext count is 3
+            assert len(await store.get_items()) == 3
+
+            # pop_item with wrong key should raise InvalidToken
+            with pytest.raises(InvalidToken):
+                await wrong.pop_item()
+
+            # Ciphertext must NOT be drained: all 3 items remain in underlying store
+            assert len(await store.get_items()) == 3
+
+            # With the correct key, all 3 messages remain fully recoverable
+            recovered = await correct.get_items()
+            assert recovered == messages
+        finally:
+            store.close()
